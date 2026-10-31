@@ -261,6 +261,27 @@ class TestNF4Linear(TestCase):
         assert type(input_tensor_nf4.to(dtype)) is torch.Tensor
         assert input_tensor_nf4.to(dtype).dtype is dtype
 
+    @parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    def test_clone_keeps_block_sizes(self, dtype: torch.dtype):
+        nf4 = to_nf4(torch.randn(64, 32, dtype=dtype), 32, 16)
+        cloned = nf4.clone()
+        self.assertEqual(cloned.block_size, 32)
+        self.assertEqual(cloned.scaler_block_size, 16)
+        self.assertEqual(cloned.get_original_weight(), nf4.get_original_weight())
+
+    @parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    def test_t_and_mm(self, dtype: torch.dtype):
+        nf4 = to_nf4(torch.randn(64, 32, dtype=dtype), 32, 16)
+        weight = nf4.get_original_weight()
+        nf4_t = nf4.t()
+        self.assertEqual(nf4_t.shape, (32, 64))
+        self.assertEqual(nf4_t.to(dtype), weight.t())
+        self.assertEqual(nf4_t.t().to(dtype), weight)
+        x = torch.randn(4, 32, dtype=dtype)
+        self.assertEqual(torch.mm(x, nf4_t), torch.mm(x, weight.t()))
+        y = torch.randn(4, 64, dtype=dtype)
+        self.assertEqual(torch.mm(y, nf4), torch.mm(y, weight))
+
     @unittest.skipIf(not torch.accelerator.is_available(), "Need GPU available")
     @parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
     def test_smoketest_linear(self, dtype: torch.dtype):

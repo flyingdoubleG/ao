@@ -190,7 +190,10 @@ def noop_detach(func, *args, **kwargs):
 
 @implements([torch.ops.aten.clone.default])
 def clone(func, *args, **kwargs):
-    return to_nf4(args[0][0].get_original_weight())
+    # clone the packed data instead of re-quantizing, which would reset block_size and scaler_block_size
+    nf4tensor = args[0][0]
+    updated_attrs = apply_to_inner_tensors(nf4tensor, func, (), {})
+    return NF4Tensor(*construct_nf4_args(nf4tensor, updated_attrs))
 
 
 @implements(
@@ -396,7 +399,7 @@ def to_dtype(func, *args, **kwargs):
 def t_default(func, *args, **kwargs):
     a = args[0][0]
     tensor_meta = SubclassTensorArgs(
-        a.size(),
+        (a.size(1), a.size(0)),
         (a.stride(1), a.stride(0)),
         a.storage_offset(),
         a.dtype,
@@ -419,7 +422,13 @@ def t_default(func, *args, **kwargs):
 
 @implements([torch.ops.aten.mm.default])
 def mm_default(func, *args, **kwargs):
-    return linear_nf4(args[0][0], args[0][1])
+    mat1, mat2 = args[0][:2]
+    # dequantize whichever operand is NF4, keeping its layout, so mm(x, w.t()) is x @ w.t()
+    if isinstance(mat1, NF4Tensor):
+        mat1 = mat1.to(mat2.dtype)
+    if isinstance(mat2, NF4Tensor):
+        mat2 = mat2.to(mat1.dtype)
+    return func(mat1, mat2)
 
 
 @implements(
@@ -844,6 +853,9 @@ class NF4Tensor(torch.Tensor):
 
     def get_original_weight(self) -> torch.Tensor:
         """Get the original weight from the normalized float weight format"""
+        if not self.is_contiguous():
+            # the packed data is in the layout of the untransposed tensor
+            return self.t().get_original_weight().t()
         # Since we are using uint8 we will decode 2 entries per byte
         # Shift elements down 4 and select out the bottom 4 bits
         first_elements = (self.quantized_data >> 4).to(torch.long)
